@@ -12,6 +12,7 @@ extern "C" {
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <limits.h>
+#include <time.h>
 
 int RS232_OpenComport(int, int);
 int RS232_PollComport(int, unsigned char *, int);
@@ -54,13 +55,28 @@ char comports[30][16]={"/dev/ttyS0","/dev/ttyS1","/dev/ttyS2","/dev/ttyS3","/dev
 
 void ProcessProgram(void);
 
+static long now_ms(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* Timestamp (ms) of the last byte we received, used to detect a stalled
+ * handshake and retry instead of hanging forever - the board never re-sends
+ * SBEGIN on its own if the first attempt is dropped. */
+static long last_rx_ms = 0;
+static int  sbegin_retries = 0;
+#define SBEGIN_RETRY_INTERVAL_MS 1000
+#define SBEGIN_MAX_RETRIES       10
+
 /*
 * argv[0]----.exe file name
 * argv[1]----ComPort number
 * argv[2]----file path
 */
 int main(int arg, char *argv[])
-{	
+{
 	int fLen = 0;
 	int device = 0;
 
@@ -111,7 +127,7 @@ int main(int arg, char *argv[])
 	char form[5] = ".bin";
 	char format[5] = "    ";
 	fLen = strlen(argv[2]);
-	if(fLen < 5) 
+	if(fLen < 5)
 	{
 		printf("File path is invalid!\n");
 		return 0;  // file path is not valid
@@ -119,7 +135,7 @@ int main(int arg, char *argv[])
 	format[3] = argv[2][fLen-1];
 	format[2] = argv[2][fLen-2];
 	format[1] = argv[2][fLen-3];
-	format[0] = argv[2][fLen-4];	
+	format[0] = argv[2][fLen-4];
 	if(0 != strcmp(form, format))
 	{
 		printf("File format must be .bin");
@@ -147,9 +163,18 @@ int main(int arg, char *argv[])
 	{
 		BlkTot = fsize / 512;
 	}
-	
+
 	printf("Block total: %d\n", BlkTot);
     BlkNum = 0;
+
+	/* Opening the port (RS232_OpenComport() above) and toggling DTR/RTS can
+	 * trigger a reset on ESP8266/NodeMCU-style auto-reset boards. Give the
+	 * board a moment to finish rebooting and discard any boot-time noise
+	 * before starting the handshake, instead of racing it. */
+	printf("Waiting for device reset to settle...\n");
+	fflush(stdout);
+	usleep(2000000); /* 2s */
+	tcflush(Cport[com], TCIFLUSH);
 
 	printf("Enable transmission...\n");
 	unsigned char buf[2] = {SBEGIN, 0};      // Enable transmission,  do not verify
@@ -166,10 +191,38 @@ int main(int arg, char *argv[])
 	{
 		printf("Request sent already! Waiting for respond...\n");
 	}
-	
+	last_rx_ms = now_ms();
+
 	while(!end)
 	{
 		ProcessProgram();
+
+		/* The board never re-sends SBEGIN on its own, so if the first
+		 * attempt is dropped the original code just polled forever with no
+		 * feedback. Resend periodically, then give up cleanly instead of
+		 * hanging indefinitely. */
+		if(!DownloadProgress && !end)
+		{
+			long t = now_ms();
+			if(t - last_rx_ms > SBEGIN_RETRY_INTERVAL_MS)
+			{
+				sbegin_retries++;
+				if(sbegin_retries > SBEGIN_MAX_RETRIES)
+				{
+					printf("\nNo response after %d attempts (%d ms) - giving up.\n"
+					       "Check the port/wiring, and that the device is running "
+					       "(not stuck in its bootloader - reset it with esptool.py "
+					       "if needed).\n",
+					       sbegin_retries, SBEGIN_RETRY_INTERVAL_MS * SBEGIN_MAX_RETRIES);
+					fclose(pfile);
+					RS232_CloseComport(com);
+					return 1;
+				}
+				RS232_SendBuf(com, buf, 2);
+				last_rx_ms = t;
+			}
+		}
+		usleep(2000); /* don't busy-spin the CPU at 100% while polling */
 	}
 	printf("Program successfully!\n");
 	BlkNum = 0;
@@ -189,6 +242,8 @@ void ProcessProgram()
 	len = RS232_PollComport(com, &rx, 1);
     if(len > 0)
     {
+		last_rx_ms = now_ms();
+		sbegin_retries = 0;
         switch(rx)
         {
             case SRSP:
@@ -202,7 +257,7 @@ void ProcessProgram()
                 else
                 {
 					if(BlkNum == 0)
-					{	
+					{
 						printf("Begin programming...\n");
 					}
 					DownloadProgress = 1;
@@ -223,7 +278,7 @@ void ProcessProgram()
 					{
 						fread(buf+1, 512, 1, pfile);
 					}
-                    
+
 
                     unsigned short CheckSum = 0x0000;
 					//unsigned int i;
@@ -233,7 +288,7 @@ void ProcessProgram()
                     }
                     buf[513] = (CheckSum >> 8) & 0x00FF;
                     buf[514] = CheckSum & 0x00FF;
-                    
+
 					RS232_SendBuf(com, buf, 515);
                     BlkNum++;
 					printf("%d  ", BlkNum);
@@ -535,4 +590,3 @@ void RS232_disableRTS(int comport_number)
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
-
