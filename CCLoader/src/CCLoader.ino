@@ -162,7 +162,7 @@ unsigned char read_debug_byte(void)
         if(HIGH == digitalRead(DD))
         {
           data |= 0x01;
-        }        
+        }
         digitalWrite(DC, LOW);     // DC low
     }
     return data;
@@ -520,27 +520,34 @@ void ProgrammerInit(void)
   digitalWrite(LED, LOW);
 }
 
-void setup() 
-{  
-  ProgrammerInit();  
+void setup()
+{
+  ProgrammerInit();
   Serial.begin(115200);
-  // If using Leonado as programmer, 
+  // If using Leonado as programmer,
   //it should add below code,otherwise,comment it.
   while(!Serial);
 }
 
-void loop() 
+void loop()
 {
   unsigned char chip_id = 0;
   unsigned char debug_config = 0;
   unsigned char Continue = 0;
   unsigned char Verify = 0;
-  
+
+  // Drop any stale bytes (e.g. boot-time noise) sitting in the RX buffer
+  // ahead of a real handshake attempt from the host.
+  while(Serial.available()) Serial.read();
+
   while(!Continue)     // Wait for starting
-  {  
-    
-    if(Serial.available()==2)
-    {      
+  {
+
+    if(Serial.available()>=2)   // was strictly ==2: a single stray byte
+                                 // ahead of the real handshake could make
+                                 // this condition never trigger, hanging
+                                 // forever.
+    {
       if(Serial.read() == SBEGIN)
       {
         Verify = Serial.read();
@@ -555,43 +562,43 @@ void loop()
 
   debug_init();
   chip_id = read_chip_id();
-  if(chip_id == 0) 
+  if(chip_id == 0)
   {
-    Serial.write(ERRO);  
+    Serial.write(ERRO);
     return; // No chip detected, run loop again.
   }
-  
+
   RunDUP();
   debug_init();
-  
+
   chip_erase();
   RunDUP();
   debug_init();
-  
+
   // Switch DUP to external crystal osc. (XOSC) and wait for it to be stable.
   // This is recommended if XOSC is available during programming. If
   // XOSC is not available, comment out these two lines.
   write_xdata_memory(DUP_CLKCONCMD, 0x80);
   while (read_xdata_memory(DUP_CLKCONSTA) != 0x80);//0x80)
-  
+
   // Enable DMA (Disable DMA_PAUSE bit in debug configuration)
   debug_config = 0x22;
   debug_command(CMD_WR_CONFIG, &debug_config, 1);
-  
+
   // Program data (start address must be word aligned [32 bit])
   Serial.write(SRSP);    // Request data blocks
-  digitalWrite(LED, HIGH);  
+  digitalWrite(LED, HIGH);
   unsigned char Done = 0;
   unsigned char State = WAITING;
-  unsigned char  rxBuf[514]; 
+  unsigned char  rxBuf[514];
   unsigned int BufIndex = 0;
   unsigned int addr = 0x0000;
   while(!Done)
   {
     while(Serial.available())
     {
-      unsigned char ch;    
-      ch = Serial.read();        
+      unsigned char ch;
+      ch = Serial.read();
       switch (State)
       {
         // Bootloader is waiting for a new block, each block begin with a flag byte
@@ -606,15 +613,15 @@ void loop()
             Done = 1;           // Exit while(1) in main function
           }
           break;
-        }      
-        // Bootloader is receiving block data  
+        }
+        // Bootloader is receiving block data
         case RECEIVING:
-        {          
+        {
           rxBuf[BufIndex] = ch;
-          BufIndex++;            
+          BufIndex++;
           if (BufIndex == 514) // If received one block, write it to flash
           {
-            BufIndex = 0;              
+            BufIndex = 0;
             uint16_t CheckSum = 0x0000;
             for(unsigned int i=0; i<512; i++)
             {
@@ -624,43 +631,42 @@ void loop()
             if(CheckSum_t != CheckSum)
             {
               State = WAITING;
-              Serial.write(ERRO);                    
+              Serial.write(ERRO);
               chip_erase();
               return;
-            } 
-            write_flash_memory_block(rxBuf, addr, 512); // src, address, count                    
+            }
+            write_flash_memory_block(rxBuf, addr, 512); // src, address, count
             if(Verify)
             {
               unsigned char bank = addr / (512 * 16);
               unsigned int  offset = (addr % (512 * 16)) * 4;
               unsigned char read_data[512];
-              read_flash_memory_block(bank, offset, 512, read_data); // Bank, address, count, dest.            
-              for(unsigned int i = 0; i < 512; i++) 
+              read_flash_memory_block(bank, offset, 512, read_data); // Bank, address, count, dest.
+              for(unsigned int i = 0; i < 512; i++)
               {
-                if(read_data[i] != rxBuf[i]) 
+                if(read_data[i] != rxBuf[i])
                 {
                   // Fail
                   State = WAITING;
-                  Serial.write(ERRO);                    
+                  Serial.write(ERRO);
                   chip_erase();
                   return;
                 }
               }
             }
-            addr += (unsigned int)128;              
+            addr += (unsigned int)128;
             State = WAITING;
             Serial.write(SRSP);
           }
           break;
-        }      
+        }
         default:
           break;
       }
     }
   }
-  
+
   digitalWrite(LED, LOW);
   RunDUP();
 }
-
 
