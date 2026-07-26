@@ -3,6 +3,10 @@ CCLoader
 
 Burn CC25xx/HM10 firmware using a NodeMCU or Wemos D1 mini.
 
+Known issue: CCLoader hangs with no response after a cold USB reconnect. 
+==========================
+On ESP8266/NodeMCU-style boards (e.g. Wemos D1 Mini), the DTR/RTS auto-reset circuit that resets the chip when the serial port opens doesn't always reliably boot it back into normal run mode after a full USB unplug/replug — it can leave the chip stuck in its ROM bootloader, where it will never respond to CCLoader no matter how long you wait. This is a hardware/driver quirk, not a CCLoader bug, and a plain reset button press doesn't fix it either. The fix is to let esptool perform its own (more robust) reset handling once before running CCLoader: run `esptool --port /dev/ttyXXX chip_id` (a quick, read-only command) after any reconnect, then run CCLoader normally. This is only needed after a physical reconnect/power-cycle — it's not required right after flashing, since the upload process already leaves the board in a working state.
+
 Flashing CC2530 or CC2531
 ==========================
 Use the files provided in folder [`Bin`](/Bin). The BIN files are already converted and ready to flash with CCLoader<br>
